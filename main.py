@@ -30,6 +30,13 @@ from gcode_gen import (PlotSettings, generate_layer_gcode, header_gcode,
                        segment_stats)
 from grbl_streamer import GrblConnection, StreamJob, list_serial_ports
 
+QUALITY_LEVELS = {
+    "Draft (0.5 mm)": 0.5,
+    "Standard (0.2 mm)": 0.2,
+    "Fine (0.05 mm)": 0.05,
+    "Ultra fine (0.02 mm)": 0.02,
+}
+
 PAPER_SIZES = {
     "12 x 12 in (304.8 x 304.8)": (304.8, 304.8),
     "A3 landscape (420 x 297)": (420.0, 297.0),
@@ -48,13 +55,14 @@ class SvgLoadThread(QThread):
     loaded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, path, parent=None):
+    def __init__(self, path, flatness_mm, parent=None):
         super().__init__(parent)
         self.path = path
+        self.flatness_mm = flatness_mm
 
     def run(self):
         try:
-            self.loaded.emit(load_svg(self.path))
+            self.loaded.emit(load_svg(self.path, flatness_mm=self.flatness_mm))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -181,6 +189,7 @@ class MainWindow(QMainWindow):
         self.job: StreamJob | None = None
         self.cmd: CommandRunner | None = None
         self.loader: SvgLoadThread | None = None
+        self.svg_path: str | None = None
         self._syncing = False
         self._unit_factor = 1.0        # display units -> mm
 
@@ -215,6 +224,15 @@ class MainWindow(QMainWindow):
         self.unit_combo.addItems(["millimeters", "inches"])
         self.unit_combo.currentIndexChanged.connect(self._units_changed)
         form.addRow("Units", self.unit_combo)
+
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(QUALITY_LEVELS.keys())
+        self.quality_combo.setCurrentText("Fine (0.05 mm)")
+        self.quality_combo.setToolTip(
+            "Maximum deviation of straight segments from the true curve.\n"
+            "Finer = smoother curves, more G-code lines, slower plots.")
+        self.quality_combo.currentTextChanged.connect(self._quality_changed)
+        form.addRow("Curve quality", self.quality_combo)
 
         self.paper_combo = QComboBox()
         self.paper_combo.addItems(PAPER_SIZES.keys())
@@ -417,6 +435,7 @@ class MainWindow(QMainWindow):
             pen_down_z=self.pen_down.value(),
             draw_feed=self.draw_feed.value(),
             z_feed=self.z_feed.value(),
+            simplify_mm=min(0.05, self._flatness_mm() / 4.0),
         )
 
     def _checked_layers(self):
@@ -436,23 +455,41 @@ class MainWindow(QMainWindow):
             return
         if self.loader and self.loader.isRunning():
             return
+        self._start_load(path, keep_layout=False)
+
+    def _flatness_mm(self) -> float:
+        return QUALITY_LEVELS[self.quality_combo.currentText()]
+
+    def _start_load(self, path: str, keep_layout: bool):
         self.open_btn.setEnabled(False)
         self.open_btn.setText("Loading...")
-        self.log(f"Loading {path} ...")
-        self.loader = SvgLoadThread(path)
-        self.loader.loaded.connect(lambda art, p=path: self._svg_loaded(art, p))
+        self.log(f"Loading {path} (quality: "
+                 f"{self.quality_combo.currentText()}) ...")
+        self.loader = SvgLoadThread(path, self._flatness_mm())
+        self.loader.loaded.connect(
+            lambda art, p=path, k=keep_layout: self._svg_loaded(art, p, k))
         self.loader.failed.connect(self._svg_failed)
         self.loader.start()
+
+    def _quality_changed(self, _text: str):
+        if self.svg_path and not (self.loader and self.loader.isRunning()):
+            self._start_load(self.svg_path, keep_layout=True)
 
     def _svg_failed(self, msg: str):
         self.open_btn.setEnabled(True)
         self.open_btn.setText("Open SVG...")
         QMessageBox.critical(self, "Could not load SVG", msg)
 
-    def _svg_loaded(self, artwork, path: str):
+    def _svg_loaded(self, artwork, path: str, keep_layout: bool = False):
         self.open_btn.setEnabled(True)
         self.open_btn.setText("Open SVG...")
         self.artwork = artwork
+        self.svg_path = path
+        prev_checks = {}
+        if keep_layout:
+            for i in range(self.layer_list.count()):
+                item = self.layer_list.item(i)
+                prev_checks[item.data(Qt.UserRole).color] = item.checkState()
         self.layer_list.blockSignals(True)
         self.layer_list.clear()
         for layer in self.artwork.layers:
@@ -460,7 +497,7 @@ class MainWindow(QMainWindow):
                 f"{layer.color}   ({len(layer.polylines)} paths)")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable
                           | Qt.ItemIsDragEnabled)
-            item.setCheckState(Qt.Checked)
+            item.setCheckState(prev_checks.get(layer.color, Qt.Checked))
             pix = QPixmap(14, 14)
             pix.fill(QColor(layer.color))
             item.setIcon(QIcon(pix))
@@ -470,7 +507,10 @@ class MainWindow(QMainWindow):
         self.log(f"Loaded {path}")
         self.log(f"  {len(self.artwork.layers)} colors, "
                  f"{sum(len(l.polylines) for l in self.artwork.layers)} paths")
-        self.fit_to_paper()
+        if keep_layout:
+            self._update_preview()
+        else:
+            self.fit_to_paper()
 
     def _paper_changed(self, name: str):
         size = PAPER_SIZES.get(name)

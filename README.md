@@ -81,11 +81,15 @@ through tight corners by design (junction deviation, `$11`).
 
 - **Draw feed**: defaults to 10,000 mm/min; the boards are rated to
   12,000. Fine nibs like slower speeds.
-- **Curve smoothness**: `DEFAULT_FLATNESS_MM` in `svg_loader.py`
-  (0.2 mm) controls how finely curves are chopped into segments.
-  Generated paths are then simplified (`simplify_mm`, 0.05 mm) to merge
-  near-collinear points into longer segments, which raises the speed
-  GRBL's planner can actually reach.
+- **Curve quality**: the selector in the size panel sets the maximum
+  deviation of straight segments from the true curve (Draft 0.5 mm to
+  Ultra fine 0.02 mm; default Fine 0.05 mm). Flattening is
+  curvature-aware, so tight little circles get the points they need
+  while gentle sweeps stay economical. Changing quality re-flattens
+  the loaded SVG in the background, keeping your size, offsets, and
+  layer selections. Finer quality = smoother curves but more G-code
+  and slightly slower plots; path simplification scales with the
+  chosen quality automatically.
 - **Acceleration is usually the real speed limit**: at $120/$121=300
   mm/s^2 the machine needs ~67 mm just to ramp up to 12,000 mm/min, so
   short strokes never reach top speed no matter what F says. Check

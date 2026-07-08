@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 import numpy as np
 from svgelements import SVG, Shape, Path, Move, Close, Line
 
+from gcode_gen import simplify_polyline
+
 # Any curve is subdivided so no sub-segment is longer than this many
 # SVG user-units.  It is re-scaled at load time so that flattening
 # quality is roughly constant in *output* millimetres.
@@ -87,9 +89,11 @@ def _approx_seg_length(seg) -> float:
 def _flatten_path(path: Path, flatness: float) -> list:
     """Convert one svgelements Path into a list of polylines.
 
-    Curves are subdivided so the chord error stays around *flatness*
-    (steps ~ sqrt(len/tolerance), the standard flattening heuristic),
-    and each curve is sampled in one vectorized numpy call.
+    Curvature-aware: every curve is oversampled well below the target
+    tolerance (with a floor of 8 samples so small tight arcs cannot be
+    under-sampled into visible facets), then Douglas-Peucker keeps
+    points only where curvature demands them. The result is dense on
+    tight curves, sparse on gentle ones, with chord error <= flatness.
     """
     polylines = []
     current = []
@@ -115,14 +119,14 @@ def _flatten_path(path: Path, flatness: float) -> list:
             if not current and seg.start is not None:
                 current = [(seg.start.x, seg.start.y)]
             seg_len = _approx_seg_length(seg)
-            steps = int(math.ceil(math.sqrt(seg_len / max(4.0 * flatness,
+            steps = int(math.ceil(math.sqrt(seg_len / max(0.5 * flatness,
                                                           1e-9))))
-            steps = min(max(steps, 3), 1000)
+            steps = min(max(steps, 8), 4000)
             ts = np.linspace(0.0, 1.0, steps + 1)[1:]
             pts = seg.npoint(ts)
             current.extend(zip(pts[:, 0].tolist(), pts[:, 1].tolist()))
     emit()
-    return polylines
+    return [simplify_polyline(pl, flatness) for pl in polylines]
 
 
 def load_svg(filepath: str, flatness_mm: float = DEFAULT_FLATNESS_MM,
